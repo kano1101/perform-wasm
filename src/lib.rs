@@ -1,3 +1,4 @@
+#[macro_export]
 macro_rules! build_perform {
     ($space:ident, $key:ty, $value:ty) => {
         mod $space {
@@ -21,7 +22,7 @@ macro_rules! build_perform {
                     })
                 }
 
-                async fn lock_and_push<F>(f: F) -> Option<$value>
+                async fn lock_and_do_mut<F>(f: F) -> Option<$value>
                 where
                     F: FnOnce(&mut HashMap<$key, $value>) -> Option<$value>,
                     $key: Hash,
@@ -30,7 +31,7 @@ macro_rules! build_perform {
                     f(&mut *hash_map)
                 }
 
-                async fn lock_and_pop<F>(f: F) -> Option<$value>
+                async fn lock_and_do<F>(f: F) -> Option<$value>
                 where
                     F: Fn(&HashMap<$key, $value>) -> Option<$value>,
                 {
@@ -38,7 +39,7 @@ macro_rules! build_perform {
                     f(&*hash_map)
                 }
                 #[allow(dead_code)]
-                fn lock_and_pop_wasm<F>(f: F) -> Option<$value>
+                fn try_lock_and_do<F>(f: F) -> Option<$value>
                 where
                     F: Fn(&HashMap<$key, $value>) -> Option<$value>,
                 {
@@ -46,9 +47,6 @@ macro_rules! build_perform {
                     f(&*hash_map)
                 }
 
-                async fn lock_and_insert(key: $key, value: $value) {
-                    lock_and_push(|hash_map| hash_map.insert(key, value)).await;
-                }
                 fn get_and_clone(key: $key, hash_map: &HashMap<$key, $value>) -> Option<$value>
                 where
                     $value: Clone,
@@ -56,29 +54,29 @@ macro_rules! build_perform {
                     hash_map.get(&key).map(|v| v.clone())
                 }
 
-                pub async fn push<Fut>(key: $key, f: Fut)
+                pub async fn set_async<Fut>(key: $key, f: Fut)
                 where
                     Fut: Future<Output = $value> + 'static,
                 {
                     let value = f.await;
-                    lock_and_insert(key, value).await;
+                    lock_and_do_mut(|hash_map| hash_map.insert(key, value)).await;
                 }
                 #[allow(dead_code)]
-                pub fn push_wasm<Fut>(key: $key, f: Fut)
+                pub fn set_begin<Fut>(key: $key, f: Fut)
                 where
                     Fut: Future<Output = $value> + 'static,
                 {
                     spawn_local(async move {
                         let value = f.await;
-                        lock_and_insert(key, value).await;
+                        lock_and_do_mut(|hash_map| hash_map.insert(key, value)).await;
                     });
                 }
-                pub async fn pop(key: $key) -> Option<$value> {
-                    lock_and_pop(|hash_map| get_and_clone(key, hash_map)).await
+                pub async fn fetch_async(key: $key) -> Option<$value> {
+                    lock_and_do(|hash_map| get_and_clone(key, hash_map)).await
                 }
                 #[allow(dead_code)]
-                pub fn pop_wasm(key: $key) -> Option<$value> {
-                    let value = lock_and_pop_wasm(|hash_map| get_and_clone(key, hash_map))?;
+                pub fn try_fetch(key: $key) -> Option<$value> {
+                    let value = try_lock_and_do(|hash_map| get_and_clone(key, hash_map))?;
                     Some(value)
                 }
             }
@@ -108,8 +106,8 @@ mod tests {
         log::info!("some info log");
         log::warn!("some warn log");
         log::error!("some error log");
-        assert!(test_module::perform::pop(1).await.is_none());
-        test_module::perform::push(1, async {
+        assert!(test_module::perform::fetch_async(1).await.is_none());
+        test_module::perform::set_async(1, async {
             reqwest::get("http://httpbin.org/ip")
                 .await
                 .unwrap()
@@ -118,7 +116,7 @@ mod tests {
                 .unwrap()
         })
         .await;
-        let body = test_module::perform::pop(1).await;
+        let body = test_module::perform::fetch_async(1).await;
         log::debug!("body: {:?}", body);
         assert!(body.is_some());
         assert!(body.unwrap().contains("origin"));
