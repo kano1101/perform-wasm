@@ -1,3 +1,4 @@
+#[macro_export]
 macro_rules! build_perform {
     ($space:ident, $key:ty, $value:ty) => {
         mod $space {
