@@ -62,7 +62,7 @@ macro_rules! build_perform {
                     lock_and_do_mut(|hash_map| hash_map.insert(key, value)).await;
                 }
                 #[allow(dead_code)]
-                pub fn set_as_spawn_local<Fut>(key: $key, f: Fut)
+                pub fn set_begin<Fut>(key: $key, f: Fut)
                 where
                     Fut: Future<Output = $value> + 'static,
                 {
