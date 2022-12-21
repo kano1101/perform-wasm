@@ -1,24 +1,25 @@
+pub use once_cell::sync::OnceCell;
+pub use tokio::sync::Mutex;
+pub use wasm_bindgen_futures::spawn_local;
+
 #[macro_export]
 macro_rules! build_perform {
     ($space:ident, $key:ty, $value:ty) => {
         mod $space {
             pub mod perform {
-                use once_cell::sync::OnceCell;
                 use std::collections::HashMap;
                 use std::future::Future;
                 use std::hash::Hash;
-                use tokio::sync::Mutex;
-                use wasm_bindgen_futures::spawn_local;
-                static STORE: OnceCell<Mutex<HashMap<$key, $value>>> = OnceCell::new();
+                static STORE: $crate::OnceCell<$crate::Mutex<HashMap<$key, $value>>> =
+                    $crate::OnceCell::new();
 
-                fn global_data() -> &'static Mutex<HashMap<$key, $value>>
+                fn global_data() -> &'static $crate::Mutex<HashMap<$key, $value>>
                 where
                     $key: Hash,
-                    $value: Default,
                 {
                     STORE.get_or_init(|| {
                         let hash_map = HashMap::new();
-                        Mutex::new(hash_map)
+                        $crate::Mutex::new(hash_map)
                     })
                 }
 
@@ -66,7 +67,7 @@ macro_rules! build_perform {
                 where
                     Fut: Future<Output = $value> + 'static,
                 {
-                    spawn_local(async move {
+                    $crate::spawn_local(async move {
                         let value = f.await;
                         lock_and_do_mut(|hash_map| hash_map.insert(key, value)).await;
                     });
