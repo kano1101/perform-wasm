@@ -8,14 +8,15 @@ pub struct Session {
     id: Uuid,
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Clone)]
 pub enum PerformError {
-    #[error("NotInitialized")]
-    NotInitialized,
+    #[error("NotSecured")]
+    NotSecured,
     #[error("Locked")]
     Locked,
 }
 
+#[derive(Clone)]
 pub enum PerformState<T> {
     Empty,
     Done(T),
@@ -27,8 +28,7 @@ macro_rules! build_perform {
         mod $space {
             use std::collections::HashMap;
             use std::future::Future;
-            use std::hash::Hash;
-            type V = $value;
+            type V = $crate::PerformState<$value>;
             type H = HashMap<$crate::Uuid, Result<V, $crate::PerformError>>;
 
             static STORE: $crate::OnceCell<$crate::Mutex<H>> = $crate::OnceCell::new();
@@ -60,7 +60,7 @@ macro_rules! build_perform {
             where
                 F: FnOnce(&mut H) -> Result<V, $crate::PerformError>,
             {
-                let mut try_lock = global_data().try_lock();
+                let try_lock = global_data().try_lock();
                 match try_lock {
                     Ok(mut hash_map) => f(&mut *hash_map),
                     Err(_) => Err($crate::PerformError::Locked),
@@ -82,7 +82,7 @@ macro_rules! build_perform {
                 pub async fn activate() -> Self {
                     let id = $crate::Uuid::new_v4();
                     lock_and_do_mut(|hash_map| {
-                        hash_map.insert(id, Err($crate::PerformError::Empty))
+                        hash_map.insert(id, Ok($crate::PerformState::Empty))
                     })
                     .await;
                     Self { id }
@@ -91,7 +91,7 @@ macro_rules! build_perform {
                     let id = $crate::Uuid::new_v4();
                     $crate::spawn_local(async move {
                         lock_and_do_mut(|hash_map| {
-                            hash_map.insert(id, Err($crate::PerformError::Empty));
+                            hash_map.insert(id, Ok($crate::PerformState::Empty));
                         })
                         .await;
                     });
@@ -103,7 +103,10 @@ macro_rules! build_perform {
                     Fut: Future<Output = $value> + 'static,
                 {
                     let value = fut.await;
-                    lock_and_do_mut(|hash_map| hash_map.insert(self.id, Ok(value))).await;
+                    lock_and_do_mut(|hash_map| {
+                        hash_map.insert(self.id, Ok($crate::PerformState::Done(value)))
+                    })
+                    .await;
                 }
                 #[allow(dead_code)]
                 pub fn perform_with_spawn_local<Fut>(&self, fut: Fut)
@@ -113,85 +116,76 @@ macro_rules! build_perform {
                     let id = self.id.clone();
                     $crate::spawn_local(async move {
                         let value = fut.await;
-                        lock_and_do_mut(|hash_map| hash_map.insert(id, Ok(value))).await;
+                        lock_and_do_mut(|hash_map| {
+                            hash_map.insert(id, Ok($crate::PerformState::Done(value)))
+                        })
+                        .await;
                     });
                 }
 
+                fn get_as_clone<'a>(
+                    id: &$crate::Uuid,
+                    hash_map: &'a H,
+                ) -> Option<&'a Result<$crate::PerformState<String>, $crate::PerformError>>
+                {
+                    hash_map.get(id)
+                }
+                fn get_as_take(
+                    hash_map: &mut H,
+                    id: &$crate::Uuid,
+                ) -> Option<Result<$crate::PerformState<String>, $crate::PerformError>> {
+                    hash_map.remove_entry(id).map(|(_id, r)| r)
+                }
+                fn into_as_clone<T, E>(result: &Result<T, E>) -> Result<T, E>
+                where
+                    T: Clone,
+                    E: Clone,
+                {
+                    match result {
+                        Ok(v) => Ok(v.clone()),
+                        Err(e) => Err(e.clone()),
+                    }
+                }
+                fn into_as_take<T, E>(result: Result<T, E>) -> Result<T, E> {
+                    result
+                }
+
+                fn clone_from_id(
+                    hash_map: &H,
+                    id: &$crate::Uuid,
+                ) -> Result<V, $crate::PerformError> {
+                    let some_result = Self::get_as_clone(id, hash_map);
+                    match some_result {
+                        Some(result) => Self::into_as_clone(result),
+                        None => Err($crate::PerformError::NotSecured),
+                    }
+                }
+                fn take_from_id(
+                    hash_map: &mut H,
+                    id: &$crate::Uuid,
+                ) -> Result<V, $crate::PerformError> {
+                    let some_result = Self::get_as_take(hash_map, id);
+                    match some_result {
+                        Some(result) => Self::into_as_take(result),
+                        None => Err($crate::PerformError::NotSecured),
+                    }
+                }
+
                 pub async fn clone(&self) -> Result<V, $crate::PerformError> {
-                    lock_and_do(|hash_map| {
-                        let some_result: Option<&Result<V, $crate::PerformError>> =
-                            hash_map.get(&self.id);
-                        match some_result {
-                            Some(result) => match result {
-                                Ok(v) => Ok(v.clone()),
-                                Err(_) => Err($crate::PerformError::Empty),
-                            },
-                            None => Err($crate::PerformError::NotInitialized),
-                        }
-                    })
-                    .await
+                    lock_and_do(|hash_map| Self::clone_from_id(hash_map, &self.id)).await
                 }
                 pub async fn take(&self) -> Result<V, $crate::PerformError> {
-                    lock_and_do_mut(|hash_map| {
-                        let some_result: Option<Result<V, $crate::PerformError>> =
-                            hash_map.remove_entry(&self.id).map(|(_id, r)| r);
-                        match some_result {
-                            Some(result) => result.map_err(|_| $crate::PerformError::Empty),
-                            None => Err($crate::PerformError::NotInitialized),
-                        }
-                    })
-                    .await
+                    lock_and_do_mut(|hash_map| Self::take_from_id(hash_map, &self.id)).await
                 }
 
                 #[allow(dead_code)]
                 pub fn try_clone(&self) -> Result<V, $crate::PerformError> {
-                    let some_result = try_lock_and_do(|hash_map| {
-                        let optional = hash_map.get(&self.id);
-                        let result: Result<V, $crate::PerformError> = match optional {
-                            None => Err($crate::PerformError::NotInitialized),
-                            Some(&result) => match result {
-                                Err($crate::PerformError::Empty) => {
-                                    Err($crate::PerformError::Empty)
-                                }
-                            },
-                        };
-                    });
-                    match some_result {
-                        Some(result) => result,
-                        None => Err($crate::PerformError::Locked),
-                    }
+                    try_lock_and_do(|hash_map| Self::clone_from_id(hash_map, &self.id))
                 }
                 #[allow(dead_code)]
                 pub fn try_take(&self) -> Result<V, $crate::PerformError> {
-                    let optional_result = try_lock_and_do_mut(|hash_map| {
-                        let some_result: Option<Result<V, $crate::PerformError>> =
-                            hash_map.remove_entry(&self.id).map(|(_id, r)| r);
-                        match some_result {
-                            Some(result) => result.map_err(|_| $crate::PerformError::Empty),
-                            None => Err($crate::PerformError::NotInitialized),
-                        }
-                    });
-                    match optional_result {
-                        Some(result) => result,
-                        None => Err($crate::PerformError::Locked),
-                    }
+                    try_lock_and_do_mut(|hash_map| Self::take_from_id(hash_map, &self.id))
                 }
-
-                // fn get<'a>(&self, hash_map: &'a H) -> Option<&'a V> {
-                //     hash_map.get(&self.id).map(|v| v.as_ref().ok()).flatten()
-                // }
-                // fn get_and_clone(&self, hash_map: &H) -> Option<V>
-                // where
-                //     V: Clone,
-                // {
-                //     match hash_map.get(&self.id) {
-                //         Some(r) => match r {
-                //             Ok(v) => Some(v.clone()),
-                //             Err(_) => None,
-                //         },
-                //         None => None,
-                //     }
-                // }
             }
         }
     };
@@ -204,8 +198,7 @@ mod tests {
     wasm_bindgen_test_configure!(run_in_browser);
 
     build_perform!(test_module, String);
-    use crate::Session;
-    use test_module::*;
+    use crate::{PerformState, Session};
 
     #[test]
     fn first_test() {
@@ -230,18 +223,23 @@ mod tests {
                 .await
                 .unwrap()
         };
-        let id = Session::activate().await;
-        id.perform(fut).await;
-        // let ip_result = test_module::peek(id).await;
-        // assert!(ip_result.is_ok());
-        // let ip = ip_result?;
-        // assert!(ip.contains("origin"));
-        let ip_result = id.take().await;
+
+        let session = Session::activate().await;
+        session.perform(fut).await;
+
+        let ip_result = session.take().await;
         assert!(ip_result.is_ok());
-        let ip = ip_result?;
-        assert!(ip.contains("origin"));
-        let ip_result = id.take().await;
+
+        if let PerformState::Done(ip) = ip_result? {
+            assert!(ip.contains("origin"));
+        } else {
+            assert!(false);
+        }
+
+        let ip_result = session.take().await;
         assert!(ip_result.is_err());
+        log::debug!("成功しました。");
+
         Ok(())
     }
 }
