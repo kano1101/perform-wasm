@@ -1,28 +1,20 @@
 [package]
-name = "perform_wasm"
+name = "manual_test"
 version = "0.1.0"
 edition = "2021"
 authors = ["Akira Kano <a.kano1101@gmail.com>"]
 
-[lib]
-doctest = false
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 anyhow = "1.0.68"
 console_error_panic_hook = "0.1.7"
 log = "0.4.17"
-once_cell = "1.16.0"
+perform_wasm = { path = "../" }
 reqwest = "0.11.13"
-thiserror = "1.0.38"
-uuid = { version = "1.2.2", features = ["v4", "js"] }
 wasm-bindgen-futures = "0.4.33"
-
-[dev-dependencies]
-wasm-bindgen-test = "0.2"
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tokio = { version = "1.23.0", features = ["full"] }
-
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tokio = { version = "1.23.0", default-features = false, features = ["sync"] }
+wasm-bindgen-test = "0.3.33"
+wasm-logger = "0.2.0"
