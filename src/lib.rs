@@ -1,3 +1,4 @@
+pub use async_trait::async_trait;
 pub use once_cell::sync::OnceCell;
 pub use thiserror::Error;
 pub use tokio::sync::Mutex;
@@ -6,7 +7,6 @@ pub use uuid::Uuid;
 #[cfg(target_arch = "wasm32")]
 pub use wasm_bindgen_futures::spawn_local;
 
-use async_trait::async_trait;
 #[async_trait]
 pub(crate) trait Performer<T> {
     async fn activate() -> Self;
@@ -93,7 +93,7 @@ macro_rules! build_perform {
             }
         }
 
-        #[async_trait::async_trait]
+        #[$crate::async_trait]
         impl $crate::Performer<$value> for $crate::Session<$value> {
             async fn activate() -> Self {
                 let id = $crate::Uuid::new_v4();

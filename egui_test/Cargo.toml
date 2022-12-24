@@ -1,0 +1,15 @@
+[package]
+name = "egui_test"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+console_error_panic_hook = "0.1.7"
+eframe = "0.20.1"
+log = "0.4.17"
+perform_wasm = { path = "../" }
+reqwest = "0.11.13"
+wasm-bindgen-futures = "0.4.33"
+wasm-logger = "0.2.0"
