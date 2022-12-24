@@ -2,10 +2,46 @@ pub use once_cell::sync::OnceCell;
 pub use thiserror::Error;
 pub use tokio::sync::Mutex;
 pub use uuid::Uuid;
+
+#[cfg(target_arch = "wasm32")]
 pub use wasm_bindgen_futures::spawn_local;
 
-pub struct Session {
+use async_trait::async_trait;
+#[async_trait]
+pub(crate) trait Performer<T> {
+    async fn activate() -> Self;
+    #[cfg(target_arch = "wasm32")]
+    fn activate_with_spawn_local() -> Self;
+
+    async fn perform<Fut>(&self, fut: Fut)
+    where
+        Fut: std::future::Future<Output = T> + 'static + Send;
+    #[cfg(target_arch = "wasm32")]
+    fn perform_with_spawn_local<Fut>(&self, fut: Fut)
+    where
+        Fut: std::future::Future<Output = T> + 'static;
+
+    async fn take(&self) -> Result<PerformState<T>, PerformError>;
+
+    fn try_take(&self) -> Result<PerformState<T>, PerformError>;
+
+    fn take_from_id(
+        &self,
+        hash_map: &mut std::collections::HashMap<Uuid, Result<PerformState<T>, PerformError>>,
+        id: &Uuid,
+    ) -> Result<PerformState<T>, PerformError>;
+    fn get_as_take(
+        &self,
+        hash_map: &mut std::collections::HashMap<Uuid, Result<PerformState<T>, PerformError>>,
+        id: &Uuid,
+    ) -> Option<Result<PerformState<T>, PerformError>>;
+    fn into_as_take<U, E>(&self, result: Result<U, E>) -> Result<U, E>;
+}
+
+pub struct Session<T> {
+    #[allow(dead_code)]
     id: Uuid,
+    _phantom: std::marker::PhantomData<T>,
 }
 
 #[derive(Debug, Error, Clone)]
@@ -57,16 +93,19 @@ macro_rules! build_perform {
             }
         }
 
-        impl $crate::Session {
-            #[cfg(not(target_arch = "wasm32"))]
-            pub async fn activate() -> Self {
+        #[async_trait::async_trait]
+        impl $crate::Performer<$value> for $crate::Session<$value> {
+            async fn activate() -> Self {
                 let id = $crate::Uuid::new_v4();
                 lock_and_do_mut(|hash_map| hash_map.insert(id, Ok($crate::PerformState::Empty)))
                     .await;
-                Self { id }
+                Self {
+                    id,
+                    _phantom: std::marker::PhantomData,
+                }
             }
             #[cfg(target_arch = "wasm32")]
-            pub fn activate_with_spawn_local() -> Self {
+            fn activate_with_spawn_local() -> Self {
                 let id = $crate::Uuid::new_v4();
                 $crate::spawn_local(async move {
                     lock_and_do_mut(|hash_map| {
@@ -74,13 +113,15 @@ macro_rules! build_perform {
                     })
                     .await;
                 });
-                Self { id }
+                Self {
+                    id,
+                    _phantom: std::marker::PhantomData,
+                }
             }
 
-            #[cfg(not(target_arch = "wasm32"))]
-            pub async fn perform<Fut>(&self, fut: Fut)
+            async fn perform<Fut>(&self, fut: Fut)
             where
-                Fut: Future<Output = $value> + 'static,
+                Fut: Future<Output = $value> + 'static + Send,
             {
                 let value = fut.await;
                 lock_and_do_mut(|hash_map| {
@@ -89,7 +130,7 @@ macro_rules! build_perform {
                 .await;
             }
             #[cfg(target_arch = "wasm32")]
-            pub fn perform_with_spawn_local<Fut>(&self, fut: Fut)
+            fn perform_with_spawn_local<Fut>(&self, fut: Fut)
             where
                 Fut: Future<Output = $value> + 'static,
             {
@@ -103,33 +144,34 @@ macro_rules! build_perform {
                 });
             }
 
-            #[cfg(not(target_arch = "wasm32"))]
-            pub async fn take(&self) -> Result<V, $crate::PerformError> {
-                lock_and_do_mut(|hash_map| Self::take_from_id(hash_map, &self.id)).await
+            async fn take(&self) -> Result<V, $crate::PerformError> {
+                lock_and_do_mut(|hash_map| self.take_from_id(hash_map, &self.id)).await
             }
 
-            pub fn try_take(&self) -> Result<V, $crate::PerformError> {
-                try_lock_and_do_mut(|hash_map| Self::take_from_id(hash_map, &self.id))
+            fn try_take(&self) -> Result<V, $crate::PerformError> {
+                try_lock_and_do_mut(|hash_map| self.take_from_id(hash_map, &self.id))
             }
 
-            fn get_as_take(
-                hash_map: &mut H,
-                id: &$crate::Uuid,
-            ) -> Option<Result<$crate::PerformState<String>, $crate::PerformError>> {
-                hash_map.remove_entry(id).map(|(_id, r)| r)
-            }
-            fn into_as_take<T, E>(result: Result<T, E>) -> Result<T, E> {
-                result
-            }
             fn take_from_id(
+                &self,
                 hash_map: &mut H,
                 id: &$crate::Uuid,
             ) -> Result<V, $crate::PerformError> {
-                let some_result = Self::get_as_take(hash_map, id);
+                let some_result = self.get_as_take(hash_map, id);
                 match some_result {
-                    Some(result) => Self::into_as_take(result),
+                    Some(result) => self.into_as_take(result),
                     None => Err($crate::PerformError::NotSecured),
                 }
+            }
+            fn get_as_take(
+                &self,
+                hash_map: &mut H,
+                id: &$crate::Uuid,
+            ) -> Option<Result<V, $crate::PerformError>> {
+                hash_map.remove_entry(id).map(|(_id, r)| r)
+            }
+            fn into_as_take<T, E>(&self, result: Result<T, E>) -> Result<T, E> {
+                result
             }
         }
     };
@@ -138,14 +180,16 @@ macro_rules! build_perform {
 #[cfg(test)]
 mod tests {
     #[allow(unused_imports)]
-    use crate::{PerformState, Session};
+    use crate::{PerformError, PerformState, Performer, Session};
 
-    async fn run_test<Fut, T, A>(fut: Fut, assert: A) -> anyhow::Result<()>
+    #[allow(dead_code)]
+    async fn run_test<Fut, T, A, S>(fut: Fut, assert: A, session: S) -> anyhow::Result<()>
     where
-        Fut: std::future::Future<Output = T> + 'static,
+        Fut: std::future::Future<Output = T> + 'static + Send,
         A: FnOnce(T),
+        S: Performer<T>,
     {
-        let session = Session::activate().await;
+        let session = session;
         session.perform(fut).await;
 
         let value_result = session.take().await;
@@ -171,9 +215,13 @@ mod tests {
     mod ip {
         build_perform!(String);
     }
-    #[cfg(not(target_arch = "wasm32"))]
+    mod status {
+        build_perform!(reqwest::StatusCode);
+    }
+
     #[tokio::test]
-    async fn second_test() -> anyhow::Result<()> {
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn second_test() {
         let fut = async {
             reqwest::get("http://httpbin.org/ip")
                 .await
@@ -182,50 +230,32 @@ mod tests {
                 .await
                 .unwrap()
         };
-        let assert = |text| {
+        let assert = |text: String| {
             assert!(text.contains("origin"));
         };
-        run_test(fut, assert).await;
+        let session = Session::<String>::activate().await;
+        let _ = run_test(fut, assert, session).await;
         log::debug!("成功しました。");
 
-        assert!(false);
-        Ok(())
+        // assert!(false);
     }
 
-    mod status {
-        build_perform!(reqwest::StatusCode);
-    }
-    #[cfg(target_arch = "wasm32")]
-    use wasm_bindgen_test::wasm_bindgen_test;
-    #[cfg(target_arch = "wasm32")]
-    use wasm_bindgen_test::wasm_bindgen_test_configure;
-    #[cfg(target_arch = "wasm32")]
-    wasm_bindgen_test_configure!(run_in_browser);
-    #[cfg(target_arch = "wasm32")]
-    #[wasm_bindgen_test]
-    async fn third_test() -> anyhow::Result<()> {
-        console_error_panic_hook::set_once();
-        #[cfg(target_arch = "wasm32")]
-        wasm_logger::init(wasm_logger::Config::default());
-        log::trace!("some trace log");
-        log::debug!("some debug log");
-        log::info!("some info log");
-        log::warn!("some warn log");
-        log::error!("some error log");
-
+    #[tokio::test]
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn third_test() {
         let fut = async {
             reqwest::get("http://httpbin.org/ip")
                 .await
                 .unwrap()
                 .status()
         };
-        let assert = |staus| {
-            assert_eq!(status == reqwest::StatusCode::OK);
+        let assert = |status| {
+            assert_eq!(status, reqwest::StatusCode::OK);
         };
-        run_test(fut, assert).await;
+        let session = Session::<reqwest::StatusCode>::activate().await;
+        let _ = run_test(fut, assert, session).await;
         log::debug!("成功しました。");
 
-        assert!(false);
-        Ok(())
+        // assert!(false);
     }
 }

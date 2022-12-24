@@ -1,7 +1,11 @@
-#[cfg(target_arch = "wasm32")]
 async fn run() {
     console_error_panic_hook::set_once();
     wasm_logger::init(wasm_logger::Config::default());
+    log::trace!("some trace log");
+    log::debug!("some debug log");
+    log::info!("some info log");
+    log::warn!("some warn log");
+    log::error!("some error log");
 
     let ip = reqwest::get("http://httpbin.org/ip")
         .await
@@ -13,7 +17,6 @@ async fn run() {
     log::debug!("ip: {:?}", ip);
 }
 
-#[cfg(target_arch = "wasm32")]
 fn main() {
     wasm_bindgen_futures::spawn_local(run());
 }

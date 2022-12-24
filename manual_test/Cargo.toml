@@ -12,9 +12,6 @@ console_error_panic_hook = "0.1.7"
 log = "0.4.17"
 perform_wasm = { path = "../" }
 reqwest = "0.11.13"
-wasm-bindgen-futures = "0.4.33"
-
-[target.'cfg(target_arch = "wasm32")'.dependencies]
 tokio = { version = "1.23.0", default-features = false, features = ["sync"] }
-wasm-bindgen-test = "0.3.33"
+wasm-bindgen-futures = "0.4.33"
 wasm-logger = "0.2.0"
