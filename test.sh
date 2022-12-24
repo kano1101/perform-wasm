@@ -1,4 +1,9 @@
 (
     cd `dirname $0`
-    wasm-pack test --headless --firefox
+    cargo test -- --nocapture &&
+        wasm-pack test --headless --firefox &&
+        (
+            cd ./manual_test/
+            ./test.sh
+        )
 )

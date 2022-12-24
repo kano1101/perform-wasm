@@ -1,84 +1,170 @@
+pub use async_trait::async_trait;
+pub use once_cell::sync::OnceCell;
+pub use thiserror::Error;
+pub use tokio::sync::Mutex;
+pub use uuid::Uuid;
+
+#[cfg(target_arch = "wasm32")]
+pub use wasm_bindgen_futures::spawn_local;
+
+#[async_trait]
+pub trait Performer<T> {
+    async fn activate() -> Self;
+    #[cfg(target_arch = "wasm32")]
+    fn activate_with_spawn_local() -> Self;
+
+    async fn perform<Fut>(&self, fut: Fut)
+    where
+        Fut: std::future::Future<Output = T> + 'static + Send;
+    #[cfg(target_arch = "wasm32")]
+    fn perform_with_spawn_local<Fut>(&self, fut: Fut)
+    where
+        Fut: std::future::Future<Output = T> + 'static;
+
+    async fn take(&self) -> Result<PerformState<T>, PerformError>;
+
+    fn try_take(&self) -> Result<PerformState<T>, PerformError>;
+
+    fn take_from_id(
+        &self,
+        hash_map: &mut std::collections::HashMap<Uuid, Result<PerformState<T>, PerformError>>,
+        id: &Uuid,
+    ) -> Result<PerformState<T>, PerformError>;
+    fn get_as_take(
+        &self,
+        hash_map: &mut std::collections::HashMap<Uuid, Result<PerformState<T>, PerformError>>,
+        id: &Uuid,
+    ) -> Option<Result<PerformState<T>, PerformError>>;
+    fn into_as_take<U, E>(&self, result: Result<U, E>) -> Result<U, E>;
+}
+
+#[derive(Debug, Error, Clone)]
+pub enum PerformError {
+    #[error("NotSecured")]
+    NotSecured,
+    #[error("Locked")]
+    Locked,
+}
+
+#[derive(Clone)]
+pub enum PerformState<T> {
+    Empty,
+    Done(T),
+}
+
 #[macro_export]
 macro_rules! build_perform {
-    ($space:ident, $key:ty, $value:ty) => {
-        mod $space {
-            pub mod perform {
-                use once_cell::sync::OnceCell;
-                use std::collections::HashMap;
-                use std::future::Future;
-                use std::hash::Hash;
-                use tokio::sync::Mutex;
-                use wasm_bindgen_futures::spawn_local;
-                static STORE: OnceCell<Mutex<HashMap<$key, $value>>> = OnceCell::new();
+    ($value:ty) => {
+        use std::collections::HashMap;
+        use std::future::Future;
+        type V = $crate::PerformState<$value>;
+        type H = HashMap<$crate::Uuid, Result<V, $crate::PerformError>>;
 
-                fn global_data() -> &'static Mutex<HashMap<$key, $value>>
-                where
-                    $key: Hash,
-                    $value: Default,
-                {
-                    STORE.get_or_init(|| {
-                        let hash_map = HashMap::new();
-                        Mutex::new(hash_map)
+        static STORE: $crate::OnceCell<$crate::Mutex<H>> = $crate::OnceCell::new();
+
+        fn global_data() -> &'static $crate::Mutex<H> {
+            STORE.get_or_init(|| {
+                let hash_map = HashMap::new();
+                $crate::Mutex::new(hash_map)
+            })
+        }
+
+        async fn lock_and_do_mut<F, R>(f: F) -> R
+        where
+            F: FnOnce(&mut H) -> R,
+        {
+            let mut hash_map = global_data().lock().await;
+            f(&mut *hash_map)
+        }
+        fn try_lock_and_do_mut<F>(f: F) -> Result<V, $crate::PerformError>
+        where
+            F: FnOnce(&mut H) -> Result<V, $crate::PerformError>,
+        {
+            let try_lock = global_data().try_lock();
+            match try_lock {
+                Ok(mut hash_map) => f(&mut *hash_map),
+                Err(_) => Err($crate::PerformError::Locked),
+            }
+        }
+
+        pub struct Session {
+            #[allow(dead_code)]
+            id: $crate::Uuid,
+        }
+
+        #[$crate::async_trait]
+        impl $crate::Performer<$value> for Session {
+            async fn activate() -> Self {
+                let id = $crate::Uuid::new_v4();
+                lock_and_do_mut(|hash_map| hash_map.insert(id, Ok($crate::PerformState::Empty)))
+                    .await;
+                Self { id }
+            }
+            #[cfg(target_arch = "wasm32")]
+            fn activate_with_spawn_local() -> Self {
+                let id = $crate::Uuid::new_v4();
+                $crate::spawn_local(async move {
+                    lock_and_do_mut(|hash_map| {
+                        hash_map.insert(id, Ok($crate::PerformState::Empty));
                     })
-                }
+                    .await;
+                });
+                Self { id }
+            }
 
-                async fn lock_and_do_mut<F>(f: F) -> Option<$value>
-                where
-                    F: FnOnce(&mut HashMap<$key, $value>) -> Option<$value>,
-                    $key: Hash,
-                {
-                    let mut hash_map = global_data().lock().await;
-                    f(&mut *hash_map)
-                }
+            async fn perform<Fut>(&self, fut: Fut)
+            where
+                Fut: Future<Output = $value> + 'static + Send,
+            {
+                let value = fut.await;
+                lock_and_do_mut(|hash_map| {
+                    hash_map.insert(self.id, Ok($crate::PerformState::Done(value)))
+                })
+                .await;
+            }
+            #[cfg(target_arch = "wasm32")]
+            fn perform_with_spawn_local<Fut>(&self, fut: Fut)
+            where
+                Fut: Future<Output = $value> + 'static,
+            {
+                let id = self.id.clone();
+                $crate::spawn_local(async move {
+                    let value = fut.await;
+                    lock_and_do_mut(|hash_map| {
+                        hash_map.insert(id, Ok($crate::PerformState::Done(value)))
+                    })
+                    .await;
+                });
+            }
 
-                async fn lock_and_do<F>(f: F) -> Option<$value>
-                where
-                    F: Fn(&HashMap<$key, $value>) -> Option<$value>,
-                {
-                    let hash_map = global_data().lock().await;
-                    f(&*hash_map)
-                }
-                #[allow(dead_code)]
-                fn try_lock_and_do<F>(f: F) -> Option<$value>
-                where
-                    F: Fn(&HashMap<$key, $value>) -> Option<$value>,
-                {
-                    let hash_map = global_data().try_lock().ok()?;
-                    f(&*hash_map)
-                }
+            async fn take(&self) -> Result<V, $crate::PerformError> {
+                lock_and_do_mut(|hash_map| self.take_from_id(hash_map, &self.id)).await
+            }
 
-                fn get_and_clone(key: $key, hash_map: &HashMap<$key, $value>) -> Option<$value>
-                where
-                    $value: Clone,
-                {
-                    hash_map.get(&key).map(|v| v.clone())
-                }
+            fn try_take(&self) -> Result<V, $crate::PerformError> {
+                try_lock_and_do_mut(|hash_map| self.take_from_id(hash_map, &self.id))
+            }
 
-                pub async fn set_async<Fut>(key: $key, f: Fut)
-                where
-                    Fut: Future<Output = $value> + 'static,
-                {
-                    let value = f.await;
-                    lock_and_do_mut(|hash_map| hash_map.insert(key, value)).await;
+            fn take_from_id(
+                &self,
+                hash_map: &mut H,
+                id: &$crate::Uuid,
+            ) -> Result<V, $crate::PerformError> {
+                let some_result = self.get_as_take(hash_map, id);
+                match some_result {
+                    Some(result) => self.into_as_take(result),
+                    None => Err($crate::PerformError::NotSecured),
                 }
-                #[allow(dead_code)]
-                pub fn set_begin<Fut>(key: $key, f: Fut)
-                where
-                    Fut: Future<Output = $value> + 'static,
-                {
-                    spawn_local(async move {
-                        let value = f.await;
-                        lock_and_do_mut(|hash_map| hash_map.insert(key, value)).await;
-                    });
-                }
-                pub async fn fetch_async(key: $key) -> Option<$value> {
-                    lock_and_do(|hash_map| get_and_clone(key, hash_map)).await
-                }
-                #[allow(dead_code)]
-                pub fn try_fetch(key: $key) -> Option<$value> {
-                    let value = try_lock_and_do(|hash_map| get_and_clone(key, hash_map))?;
-                    Some(value)
-                }
+            }
+            fn get_as_take(
+                &self,
+                hash_map: &mut H,
+                id: &$crate::Uuid,
+            ) -> Option<Result<V, $crate::PerformError>> {
+                hash_map.remove_entry(id).map(|(_id, r)| r)
+            }
+            fn into_as_take<T, E>(&self, result: Result<T, E>) -> Result<T, E> {
+                result
             }
         }
     };
@@ -86,39 +172,83 @@ macro_rules! build_perform {
 
 #[cfg(test)]
 mod tests {
-    use wasm_bindgen_test::wasm_bindgen_test;
-    use wasm_bindgen_test::wasm_bindgen_test_configure;
-    wasm_bindgen_test_configure!(run_in_browser);
+    #[allow(unused_imports)]
+    use crate::{PerformError, PerformState, Performer};
 
-    build_perform!(test_module, i32, String);
+    #[allow(dead_code)]
+    async fn run_test<Fut, T, A, S>(fut: Fut, assert: A, session: S) -> anyhow::Result<()>
+    where
+        Fut: std::future::Future<Output = T> + 'static + Send,
+        A: FnOnce(T),
+        S: Performer<T>,
+    {
+        let session = session;
+        session.perform(fut).await;
+
+        let value_result = session.take().await;
+        assert!(value_result.is_ok());
+
+        if let PerformState::Done(value) = value_result? {
+            assert(value);
+        } else {
+            assert!(false);
+        }
+
+        let value_result = session.take().await;
+        assert!(value_result.is_err());
+
+        Ok(())
+    }
 
     #[test]
     fn first_test() {
         assert!(true);
     }
 
-    #[wasm_bindgen_test]
+    mod ip {
+        build_perform!(String);
+    }
+    mod status {
+        build_perform!(reqwest::StatusCode);
+    }
+
+    #[tokio::test]
+    #[cfg(not(target_arch = "wasm32"))]
     async fn second_test() {
-        console_error_panic_hook::set_once();
-        wasm_logger::init(wasm_logger::Config::default());
-        log::trace!("some trace log");
-        log::debug!("some debug log");
-        log::info!("some info log");
-        log::warn!("some warn log");
-        log::error!("some error log");
-        assert!(test_module::perform::fetch_async(1).await.is_none());
-        test_module::perform::set_async(1, async {
+        let fut = async {
             reqwest::get("http://httpbin.org/ip")
                 .await
                 .unwrap()
                 .text()
                 .await
                 .unwrap()
-        })
-        .await;
-        let body = test_module::perform::fetch_async(1).await;
-        log::debug!("body: {:?}", body);
-        assert!(body.is_some());
-        assert!(body.unwrap().contains("origin"));
+        };
+        let assert = |text: String| {
+            assert!(text.contains("origin"));
+        };
+        let session = ip::Session::activate().await;
+        let _ = run_test(fut, assert, session).await;
+        log::debug!("成功しました。");
+
+        // assert!(false);
+    }
+
+    #[tokio::test]
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn third_test() {
+        let fut = async {
+            reqwest::get("http://httpbin.org/ip")
+                .await
+                .unwrap()
+                .status()
+        };
+        let assert = |status| {
+            assert_eq!(status, reqwest::StatusCode::OK);
+        };
+        let session = status::Session::activate().await;
+        let _ = run_test(fut, assert, session).await;
+        log::debug!("成功しました。");
+
+        // assert!(false);
     }
 }
