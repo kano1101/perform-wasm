@@ -8,7 +8,7 @@ pub use uuid::Uuid;
 pub use wasm_bindgen_futures::spawn_local;
 
 #[async_trait]
-pub(crate) trait Performer<T> {
+pub trait Performer<T> {
     async fn activate() -> Self;
     #[cfg(target_arch = "wasm32")]
     fn activate_with_spawn_local() -> Self;
@@ -36,12 +36,6 @@ pub(crate) trait Performer<T> {
         id: &Uuid,
     ) -> Option<Result<PerformState<T>, PerformError>>;
     fn into_as_take<U, E>(&self, result: Result<U, E>) -> Result<U, E>;
-}
-
-pub struct Session<T> {
-    #[allow(dead_code)]
-    id: Uuid,
-    _phantom: std::marker::PhantomData<T>,
 }
 
 #[derive(Debug, Error, Clone)]
@@ -93,16 +87,18 @@ macro_rules! build_perform {
             }
         }
 
+        pub struct Session {
+            #[allow(dead_code)]
+            id: $crate::Uuid,
+        }
+
         #[$crate::async_trait]
-        impl $crate::Performer<$value> for $crate::Session<$value> {
+        impl $crate::Performer<$value> for Session {
             async fn activate() -> Self {
                 let id = $crate::Uuid::new_v4();
                 lock_and_do_mut(|hash_map| hash_map.insert(id, Ok($crate::PerformState::Empty)))
                     .await;
-                Self {
-                    id,
-                    _phantom: std::marker::PhantomData,
-                }
+                Self { id }
             }
             #[cfg(target_arch = "wasm32")]
             fn activate_with_spawn_local() -> Self {
@@ -113,10 +109,7 @@ macro_rules! build_perform {
                     })
                     .await;
                 });
-                Self {
-                    id,
-                    _phantom: std::marker::PhantomData,
-                }
+                Self { id }
             }
 
             async fn perform<Fut>(&self, fut: Fut)
@@ -180,7 +173,7 @@ macro_rules! build_perform {
 #[cfg(test)]
 mod tests {
     #[allow(unused_imports)]
-    use crate::{PerformError, PerformState, Performer, Session};
+    use crate::{PerformError, PerformState, Performer};
 
     #[allow(dead_code)]
     async fn run_test<Fut, T, A, S>(fut: Fut, assert: A, session: S) -> anyhow::Result<()>
@@ -233,7 +226,7 @@ mod tests {
         let assert = |text: String| {
             assert!(text.contains("origin"));
         };
-        let session = Session::<String>::activate().await;
+        let session = ip::Session::activate().await;
         let _ = run_test(fut, assert, session).await;
         log::debug!("成功しました。");
 
@@ -252,7 +245,7 @@ mod tests {
         let assert = |status| {
             assert_eq!(status, reqwest::StatusCode::OK);
         };
-        let session = Session::<reqwest::StatusCode>::activate().await;
+        let session = status::Session::activate().await;
         let _ = run_test(fut, assert, session).await;
         log::debug!("成功しました。");
 

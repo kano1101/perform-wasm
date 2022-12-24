@@ -13,6 +13,11 @@ fn main() {
 fn main() {
     console_error_panic_hook::set_once();
     wasm_logger::init(wasm_logger::Config::default());
+    log::trace!("some trace log");
+    log::debug!("some debug log");
+    log::info!("some info log");
+    log::warn!("some warn log");
+    log::error!("some error log");
 
     let web_options = eframe::WebOptions::default();
     wasm_bindgen_futures::spawn_local(async {
@@ -26,24 +31,25 @@ fn main() {
     });
 }
 
-use perform_wasm::Session;
 mod ip {
     perform_wasm::build_perform!(String);
 }
+use perform_wasm::{PerformState, Performer};
 
+#[derive(PartialEq)]
 enum Progress {
     Triggered,
     Off,
 }
 
 struct Application {
-    session: Session<String>,
+    session: ip::Session,
     ip_optional: (Progress, Option<String>),
 }
 impl Application {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Application {
+    pub fn new(_cc: &eframe::CreationContext<'_>) -> Application {
         Application {
-            session: Session::<String>::activate_with_spawn_local(),
+            session: ip::Session::activate_with_spawn_local(),
             ip_optional: (Progress::Off, None),
         }
     }
@@ -51,17 +57,31 @@ impl Application {
 impl eframe::App for Application {
     fn update(&mut self, ctx: &eframe::egui::Context, _frame: &mut eframe::Frame) {
         eframe::egui::CentralPanel::default().show(ctx, |ui: &mut eframe::egui::Ui| {
-            // let fut = async { reqwest::get("").await.unwrap().text().await.unwrap() };
-            // if let Some(ip) = self.ip_optional.1 {
-            //     log::debug!("{}", ip);
-            // } else {
-            //     if self.ip_optional.0 != Progress::Triggered {
-            //         self.session.try_take();
-            //         self.ip_optional.0 = Progress::Triggered;
-            //     }
-            //     let dur = std::time::Duration::from_millis(100);
-            //     ctx.request_repaint_after(dur);
-            // }
+            if let Some(ip) = &self.ip_optional.1 {
+                log::debug!("ip: {}", ip);
+                ui.label(ip);
+            } else {
+                let took = self.session.try_take();
+                if let Ok(PerformState::Done(ip)) = took {
+                    self.ip_optional.1 = Some(ip);
+                    self.ip_optional.0 = Progress::Off;
+                } else {
+                    if self.ip_optional.0 == Progress::Off {
+                        let fut = async {
+                            reqwest::get("http://httpbin.org/ip")
+                                .await
+                                .unwrap()
+                                .text()
+                                .await
+                                .unwrap()
+                        };
+                        self.session.perform_with_spawn_local(fut);
+                        self.ip_optional.0 = Progress::Triggered;
+                    }
+                    let dur = std::time::Duration::from_millis(100);
+                    ctx.request_repaint_after(dur);
+                }
+            }
         });
     }
 }
