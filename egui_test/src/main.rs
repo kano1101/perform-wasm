@@ -58,11 +58,11 @@ impl eframe::App for Application {
     fn update(&mut self, ctx: &eframe::egui::Context, _frame: &mut eframe::Frame) {
         eframe::egui::CentralPanel::default().show(ctx, |ui: &mut eframe::egui::Ui| {
             if let Some(ip) = &self.ip_optional.1 {
-                log::debug!("ip: {}", ip);
                 ui.label(ip);
             } else {
                 let took = self.session.try_take();
                 if let Ok(PerformState::Done(ip)) = took {
+                    log::debug!("ip: {}", ip);
                     self.ip_optional.1 = Some(ip);
                     self.ip_optional.0 = Progress::Off;
                 } else {
@@ -78,9 +78,10 @@ impl eframe::App for Application {
                         self.session.perform_with_spawn_local(fut);
                         self.ip_optional.0 = Progress::Triggered;
                     }
-                    let dur = std::time::Duration::from_millis(100);
-                    ctx.request_repaint_after(dur);
                 }
+                let dur = std::time::Duration::from_millis(250);
+                ctx.request_repaint_after(dur);
+                log::debug!("test!");
             }
         });
     }
