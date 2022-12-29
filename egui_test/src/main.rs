@@ -34,55 +34,90 @@ fn main() {
 mod ip {
     perform_wasm::build_perform!(String);
 }
-use perform_wasm::{PerformState, Performer};
-
-#[derive(PartialEq)]
-enum Progress {
-    Triggered,
-    Off,
-}
 
 struct Application {
-    session: ip::Session,
-    ip_optional: (Progress, Option<String>),
+    taker: ip::Taker,
+    response: Option<String>,
+    displaying_bg_color_step: f32,
 }
 impl Application {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Application {
+        use perform_wasm::Performer as _;
+        let session = ip::Session::activate_with_spawn_local();
+        let taker = ip::Taker::new(session);
         Application {
-            session: ip::Session::activate_with_spawn_local(),
-            ip_optional: (Progress::Off, None),
+            taker: taker,
+            response: None,
+            displaying_bg_color_step: 0.,
         }
     }
 }
 impl eframe::App for Application {
     fn update(&mut self, ctx: &eframe::egui::Context, _frame: &mut eframe::Frame) {
         eframe::egui::CentralPanel::default().show(ctx, |ui: &mut eframe::egui::Ui| {
-            if let Some(ip) = &self.ip_optional.1 {
-                ui.label(ip);
-            } else {
-                let took = self.session.try_take();
-                if let Ok(PerformState::Done(ip)) = took {
-                    log::debug!("ip: {}", ip);
-                    self.ip_optional.1 = Some(ip);
-                    self.ip_optional.0 = Progress::Off;
-                } else {
-                    if self.ip_optional.0 == Progress::Off {
-                        let fut = async {
-                            reqwest::get("http://httpbin.org/ip")
-                                .await
-                                .unwrap()
-                                .text()
-                                .await
-                                .unwrap()
-                        };
-                        self.session.perform_with_spawn_local(fut);
-                        self.ip_optional.0 = Progress::Triggered;
-                    }
-                }
-                let dur = std::time::Duration::from_millis(250);
-                ctx.request_repaint_after(dur);
-                log::debug!("test!");
+            let fut = async {
+                reqwest::get("http://httpbin.org/ip")
+                    .await
+                    .unwrap()
+                    .text()
+                    .await
+                    .unwrap()
+            };
+            if let None = self.response {
+                self.response = self.taker.try_take(fut);
             }
+            let micro = "Now loading...".to_string();
+            let color_weight_max = 255.;
+            self.response
+                .as_ref()
+                .or_else(|| {
+                    self.displaying_bg_color_step = color_weight_max;
+                    let dur = std::time::Duration::from_millis(250);
+                    ctx.request_repaint_after(dur);
+                    log::debug!("Request repaint again!");
+                    Some(&micro)
+                })
+                .and_then(|state| {
+                    let highlight_color = if color_weight_max == self.displaying_bg_color_step {
+                        eframe::egui::Color32::LIGHT_RED.to_array()
+                    } else {
+                        eframe::egui::Color32::DARK_GREEN.to_array()
+                    };
+
+                    let tone_down_speed = 8.;
+                    let mut tone = self.displaying_bg_color_step - tone_down_speed;
+                    if tone < 0. {
+                        self.displaying_bg_color_step = 0.;
+                        tone = 0.;
+                    } else {
+                        self.displaying_bg_color_step = tone;
+                        let dur = std::time::Duration::from_millis(16);
+                        ctx.request_repaint_after(dur);
+                    }
+                    log::debug!("tone: {}", tone);
+
+                    let visuals = ui.visuals_mut();
+                    let base_color = visuals.extreme_bg_color.to_array();
+                    let mut finish_color = visuals.extreme_bg_color.to_array();
+
+                    use itertools::izip;
+                    for (base, highlight, finish) in
+                        izip!(&base_color, &highlight_color, &mut finish_color)
+                    {
+                        let current_weight = tone;
+                        let diff = *highlight as f32 - *base as f32;
+                        let rate = current_weight / color_weight_max;
+                        *finish = (*base as f32 + (diff * rate)) as u8;
+                    }
+                    let [r, g, b, _a] = finish_color;
+                    let finish_color = eframe::egui::Color32::from_rgb(r, g, b);
+                    visuals.extreme_bg_color = finish_color;
+
+                    let mut state = state.clone();
+                    ui.text_edit_singleline(&mut state);
+                    log::debug!("Color change testing");
+                    Some(state)
+                });
         });
     }
 }

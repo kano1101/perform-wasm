@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 console_error_panic_hook = "0.1.7"
 eframe = "0.20.1"
+itertools = "0.10.5"
 log = "0.4.17"
 perform_wasm = { path = "../" }
 reqwest = "0.11.13"

@@ -4,19 +4,21 @@ pub use thiserror::Error;
 pub use tokio::sync::Mutex;
 pub use uuid::Uuid;
 
-#[cfg(target_arch = "wasm32")]
+#[allow(unused_imports)]
 pub use wasm_bindgen_futures::spawn_local;
+
+use std::collections::HashMap;
 
 #[async_trait]
 pub trait Performer<T> {
     async fn activate() -> Self;
-    #[cfg(target_arch = "wasm32")]
+    #[allow(dead_code)]
     fn activate_with_spawn_local() -> Self;
 
     async fn perform<Fut>(&self, fut: Fut)
     where
         Fut: std::future::Future<Output = T> + 'static + Send;
-    #[cfg(target_arch = "wasm32")]
+    #[allow(dead_code)]
     fn perform_with_spawn_local<Fut>(&self, fut: Fut)
     where
         Fut: std::future::Future<Output = T> + 'static;
@@ -27,12 +29,12 @@ pub trait Performer<T> {
 
     fn take_from_id(
         &self,
-        hash_map: &mut std::collections::HashMap<Uuid, Result<PerformState<T>, PerformError>>,
+        hash_map: &mut HashMap<Uuid, Result<PerformState<T>, PerformError>>,
         id: &Uuid,
     ) -> Result<PerformState<T>, PerformError>;
     fn get_as_take(
         &self,
-        hash_map: &mut std::collections::HashMap<Uuid, Result<PerformState<T>, PerformError>>,
+        hash_map: &mut HashMap<Uuid, Result<PerformState<T>, PerformError>>,
         id: &Uuid,
     ) -> Option<Result<PerformState<T>, PerformError>>;
     fn into_as_take<U, E>(&self, result: Result<U, E>) -> Result<U, E>;
@@ -50,6 +52,12 @@ pub enum PerformError {
 pub enum PerformState<T> {
     Empty,
     Done(T),
+}
+
+#[derive(PartialEq)]
+pub enum Progress {
+    Triggered,
+    Off,
 }
 
 #[macro_export]
@@ -100,7 +108,7 @@ macro_rules! build_perform {
                     .await;
                 Self { id }
             }
-            #[cfg(target_arch = "wasm32")]
+            #[allow(dead_code)]
             fn activate_with_spawn_local() -> Self {
                 let id = $crate::Uuid::new_v4();
                 $crate::spawn_local(async move {
@@ -122,7 +130,7 @@ macro_rules! build_perform {
                 })
                 .await;
             }
-            #[cfg(target_arch = "wasm32")]
+            #[allow(dead_code)]
             fn perform_with_spawn_local<Fut>(&self, fut: Fut)
             where
                 Fut: Future<Output = $value> + 'static,
@@ -165,6 +173,40 @@ macro_rules! build_perform {
             }
             fn into_as_take<T, E>(&self, result: Result<T, E>) -> Result<T, E> {
                 result
+            }
+        }
+
+        #[allow(dead_code)]
+        pub struct Taker {
+            session: Session,
+            progress: $crate::Progress,
+        }
+        impl Taker {
+            #[allow(dead_code)]
+            pub fn new(session: Session) -> Self {
+                let instance = Self {
+                    session: session,
+                    progress: $crate::Progress::Off,
+                };
+                return instance;
+            }
+            #[allow(dead_code)]
+            pub fn try_take<F>(&mut self, fut: F) -> Option<$value>
+            where
+                F: std::future::Future<Output = $value> + 'static,
+            {
+                use $crate::Performer as _;
+                let took = self.session.try_take();
+                if let Ok($crate::PerformState::Done(output)) = took {
+                    self.progress = $crate::Progress::Off;
+                    return Some(output);
+                } else {
+                    if self.progress == $crate::Progress::Off {
+                        self.session.perform_with_spawn_local(fut);
+                        self.progress = $crate::Progress::Triggered;
+                    }
+                }
+                return None;
             }
         }
     };
@@ -214,7 +256,7 @@ mod tests {
 
     #[tokio::test]
     #[cfg(not(target_arch = "wasm32"))]
-    async fn second_test() {
+    async fn second_test_one_build() {
         let fut = async {
             reqwest::get("http://httpbin.org/ip")
                 .await
@@ -235,7 +277,7 @@ mod tests {
 
     #[tokio::test]
     #[cfg(not(target_arch = "wasm32"))]
-    async fn third_test() {
+    async fn third_test_many_build() {
         let fut = async {
             reqwest::get("http://httpbin.org/ip")
                 .await
