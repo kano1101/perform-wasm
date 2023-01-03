@@ -41,7 +41,7 @@ struct SinglelineMyText {
     update_request_interval: std::time::Duration,
     update_request_duration: std::time::Duration,
     micro_copy: String,
-    highlighter: ColorTone,
+    color_tone: ColorTone,
 }
 impl SinglelineMyText {
     pub fn new() -> Self {
@@ -54,7 +54,7 @@ impl SinglelineMyText {
             update_request_interval: std::time::Duration::from_millis(250),
             update_request_duration: std::time::Duration::from_millis(16),
             micro_copy: "Now loading...".to_string(),
-            highlighter: ColorTone::new(),
+            color_tone: ColorTone::new(),
         }
     }
     fn update(&mut self, ctx: &eframe::egui::Context, ui: &mut eframe::egui::Ui) {
@@ -73,24 +73,26 @@ impl SinglelineMyText {
         self.response
             .as_ref()
             .or_else(|| {
-                self.highlighter.to_top();
+                self.color_tone.to_top();
                 ctx.request_repaint_after(self.update_request_interval);
                 log::trace!("Request repaint again!");
                 Some(&self.micro_copy)
             })
             .and_then(|state| {
-                if let Some(()) = self.highlighter.styling(ui) {
+                if let Some(()) = self.color_tone.styling(ui) {
                     ctx.request_repaint_after(self.update_request_duration);
                 }
 
                 let mut state = state.clone();
                 ui.text_edit_singleline(&mut state);
+
                 let is_enter_pressed = ui
                     .input_mut()
                     .consume_key(eframe::egui::Modifiers::NONE, eframe::egui::Key::Enter);
                 if is_enter_pressed {
-                    self.highlighter.commit();
+                    self.color_tone.commit();
                 }
+
                 Some(state)
             });
     }
@@ -108,13 +110,13 @@ enum ColorTone {
     Top,
 }
 impl ColorTone {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self::Top
     }
-    pub fn zero() -> Self {
+    fn zero() -> Self {
         Self::Step(0.)
     }
-    pub fn top_value() -> f32 {
+    fn top_value() -> f32 {
         256.
     }
     fn tone_down() -> f32 {
