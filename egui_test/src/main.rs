@@ -38,14 +38,10 @@ mod ip {
 struct SinglelineMyText {
     taker: ip::Taker,
     response: Option<String>,
-    displaying_bg_color_step: f32,
-    color_weight_max: f32,
     update_request_interval: std::time::Duration,
     update_request_duration: std::time::Duration,
     micro_copy: String,
-    waiting_bg_color: eframe::egui::Color32,
-    updated_bg_color: eframe::egui::Color32,
-    tone_down_speed: f32,
+    highlighter: ColorTone,
 }
 impl SinglelineMyText {
     pub fn new() -> Self {
@@ -55,14 +51,10 @@ impl SinglelineMyText {
         Self {
             taker: taker,
             response: None,
-            displaying_bg_color_step: 0.,
-            color_weight_max: 255.,
             update_request_interval: std::time::Duration::from_millis(250),
             update_request_duration: std::time::Duration::from_millis(16),
             micro_copy: "Now loading...".to_string(),
-            waiting_bg_color: eframe::egui::Color32::DARK_GREEN,
-            updated_bg_color: eframe::egui::Color32::LIGHT_BLUE,
-            tone_down_speed: 8.,
+            highlighter: ColorTone::new(),
         }
     }
     fn update(&mut self, ctx: &eframe::egui::Context, ui: &mut eframe::egui::Ui) {
@@ -81,43 +73,15 @@ impl SinglelineMyText {
         self.response
             .as_ref()
             .or_else(|| {
-                self.displaying_bg_color_step = self.color_weight_max;
+                self.highlighter.to_top();
                 ctx.request_repaint_after(self.update_request_interval);
                 log::trace!("Request repaint again!");
                 Some(&self.micro_copy)
             })
             .and_then(|state| {
-                let highlight_color = self.current_bg_color().to_array();
-
-                let mut tone = self.displaying_bg_color_step - self.tone_down_speed;
-                if tone < 0. {
-                    self.displaying_bg_color_step = 0.;
-                    tone = 0.;
-                } else {
-                    self.displaying_bg_color_step = tone;
+                if let Some(()) = self.highlighter.styling(ui) {
                     ctx.request_repaint_after(self.update_request_duration);
                 }
-                log::trace!("tone: {}", tone);
-
-                let visuals = ui.visuals_mut();
-
-                let base_color = visuals.extreme_bg_color.to_array();
-                let mut finish_color = visuals.extreme_bg_color.to_array();
-
-                use itertools::izip;
-                for (base, highlight, finish) in
-                    izip!(&base_color, &highlight_color, &mut finish_color)
-                {
-                    let current_weight = tone;
-                    let diff = *highlight as f32 - *base as f32;
-                    let rate = current_weight / self.color_weight_max;
-                    *finish = (*base as f32 + (diff * rate)) as u8;
-                }
-
-                let [r, g, b, _a] = finish_color;
-                let finish_color = eframe::egui::Color32::from_rgb(r, g, b);
-
-                visuals.extreme_bg_color = finish_color;
 
                 let mut state = state.clone();
                 ui.text_edit_singleline(&mut state);
@@ -125,23 +89,130 @@ impl SinglelineMyText {
                     .input_mut()
                     .consume_key(eframe::egui::Modifiers::NONE, eframe::egui::Key::Enter);
                 if is_enter_pressed {
-                    self.displaying_bg_color_step = self.color_weight_max;
+                    self.highlighter.commit();
                 }
                 Some(state)
             });
-    }
-    fn current_bg_color(&mut self) -> eframe::egui::Color32 {
-        if self.color_weight_max == self.displaying_bg_color_step {
-            self.waiting_bg_color
-        } else {
-            self.updated_bg_color
-        }
     }
     fn is_take_required(&self) -> bool {
         self.response.is_none()
     }
     fn take_necessity(&mut self, took: Option<String>) {
         self.response = took
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum ColorTone {
+    Step(f32),
+    Top,
+}
+impl ColorTone {
+    pub fn new() -> Self {
+        Self::Top
+    }
+    pub fn zero() -> Self {
+        Self::Step(0.)
+    }
+    pub fn top_value() -> f32 {
+        256.
+    }
+    fn tone_down() -> f32 {
+        8.
+    }
+}
+trait TopToDown {
+    type Value;
+    fn to_top(&mut self);
+    fn current_value(&self) -> f32;
+}
+impl TopToDown for ColorTone {
+    type Value = Self;
+    fn to_top(&mut self) {
+        *self = Self::Top
+    }
+    fn current_value(&self) -> f32 {
+        match self {
+            Self::Step(step) => *step,
+            Self::Top => Self::top_value(),
+        }
+    }
+}
+trait Highlighter {
+    fn coloring(&self) -> eframe::egui::Color32;
+}
+impl Highlighter for ColorTone {
+    fn coloring(&self) -> eframe::egui::Color32 {
+        if *self == Self::Top {
+            eframe::egui::Color32::DARK_GREEN
+        } else {
+            eframe::egui::Color32::LIGHT_BLUE
+        }
+    }
+}
+impl Iterator for ColorTone {
+    type Item = ColorTone;
+    fn next(&mut self) -> Option<ColorTone> {
+        match self {
+            ColorTone::Step(tone) => {
+                let tone = *tone - Self::tone_down();
+                if tone <= 0. {
+                    *self = ColorTone::Step(0.);
+                    None
+                } else {
+                    *self = ColorTone::Step(tone);
+                    Some(self.clone())
+                }
+            }
+            ColorTone::Top => {
+                *self = ColorTone::Step(Self::top_value());
+                Some(self.clone())
+            }
+        }
+    }
+}
+impl Default for ColorTone {
+    fn default() -> ColorTone {
+        ColorTone::zero()
+    }
+}
+trait ToneHighlighter: Iterator + TopToDown + Highlighter {}
+impl ToneHighlighter for ColorTone {}
+
+trait CommitableHighlighter: ToneHighlighter {
+    fn commit(&mut self);
+    fn styling(&mut self, ui: &mut eframe::egui::Ui) -> Option<()>
+    where
+        <Self as Iterator>::Item: std::fmt::Debug + Clone + Default + TopToDown,
+    {
+        let visuals = ui.visuals_mut();
+
+        let base_color = visuals.extreme_bg_color.to_array();
+        let highlight_color = self.coloring().to_array();
+        let mut finish_color = visuals.extreme_bg_color.to_array();
+
+        let highlighted = self.next();
+        let current_weight = highlighted.clone().unwrap_or_default();
+        log::trace!("current_weight: {:?}", current_weight);
+
+        use itertools::izip;
+        for (base, highlight, finish) in izip!(&base_color, &highlight_color, &mut finish_color) {
+            let diff = *highlight as f32 - *base as f32;
+            let rate = current_weight.current_value() / ColorTone::top_value();
+            *finish = (*base as f32 + (diff * rate)) as u8;
+        }
+
+        let [r, g, b, _a] = finish_color;
+        let finish_color = eframe::egui::Color32::from_rgb(r, g, b);
+
+        visuals.extreme_bg_color = finish_color;
+
+        highlighted.map(|_| ())
+    }
+}
+impl CommitableHighlighter for ColorTone {
+    fn commit(&mut self) {
+        self.to_top()
     }
 }
 
