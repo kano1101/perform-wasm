@@ -188,7 +188,7 @@ macro_rules! build_perform {
                 })
             }
             #[allow(dead_code)]
-            pub async fn perform_or_not<F>(&mut self, fut: F)
+            pub async fn perform_one_time_or_not<F>(&mut self, fut: F)
             where
                 F: std::future::Future<Output = V> + 'static + Send,
             {
@@ -199,7 +199,7 @@ macro_rules! build_perform {
                 }
             }
             #[allow(dead_code)]
-            pub fn perform_or_not_with_spawn_local<F>(&mut self, fut: F)
+            pub fn perform_one_time_or_not_with_spawn_local<F>(&mut self, fut: F)
             where
                 F: std::future::Future<Output = V> + 'static,
             {
