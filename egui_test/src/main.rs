@@ -67,7 +67,7 @@ impl SinglelineMyText {
                 .unwrap()
         };
         self.is_take_required().then(|| {
-            self.performer.perform_with_spawn_local(fut);
+            self.performer.perform_one_time_or_not_with_spawn_local(fut);
             let took = self.performer.try_take().ok();
             self.response = took;
         });
