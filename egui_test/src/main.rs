@@ -36,7 +36,7 @@ mod ip {
 }
 
 struct SinglelineMyText {
-    taker: ip::Taker,
+    performer: ip::Performer,
     response: Option<String>,
     update_request_interval: std::time::Duration,
     update_request_duration: std::time::Duration,
@@ -45,11 +45,11 @@ struct SinglelineMyText {
 }
 impl SinglelineMyText {
     pub fn new() -> Self {
-        use perform_wasm::Performer as _;
-        let session = ip::Session::activate_with_spawn_local();
-        let taker = ip::Taker::new(session);
+        use perform_wasm::Perform as _;
+        let session = ip::Session::try_activate();
+        let performer = ip::Performer::new(session);
         Self {
-            taker: taker,
+            performer: performer,
             response: None,
             update_request_interval: std::time::Duration::from_millis(250),
             update_request_duration: std::time::Duration::from_millis(16),
@@ -66,10 +66,11 @@ impl SinglelineMyText {
                 .await
                 .unwrap()
         };
-        if self.is_take_required() {
-            let took = self.taker.try_take(fut);
-            self.take_necessity(took);
-        }
+        self.is_take_required().then(|| {
+            self.performer.perform_with_spawn_local(fut);
+            let took = self.performer.try_take().ok();
+            self.response = took;
+        });
         self.response
             .as_ref()
             .or_else(|| {
@@ -98,9 +99,6 @@ impl SinglelineMyText {
     }
     fn is_take_required(&self) -> bool {
         self.response.is_none()
-    }
-    fn take_necessity(&mut self, took: Option<String>) {
-        self.response = took
     }
 }
 

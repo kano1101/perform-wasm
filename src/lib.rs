@@ -10,54 +10,50 @@ pub use wasm_bindgen_futures::spawn_local;
 use std::collections::HashMap;
 
 #[async_trait]
-pub trait Performer<T> {
-    async fn activate() -> Self;
+pub trait Perform<T> {
     #[allow(dead_code)]
-    fn activate_with_spawn_local() -> Self;
+    fn try_activate() -> Self;
+    async fn activate() -> Self;
 
-    async fn perform<Fut>(&self, fut: Fut)
-    where
-        Fut: std::future::Future<Output = T> + 'static + Send;
     #[allow(dead_code)]
     fn perform_with_spawn_local<Fut>(&self, fut: Fut)
     where
         Fut: std::future::Future<Output = T> + 'static;
+    async fn perform<Fut>(&self, fut: Fut)
+    where
+        Fut: std::future::Future<Output = T> + 'static + Send;
 
-    async fn take(&self) -> Result<PerformState<T>, PerformError>;
+    fn try_ready(&self) -> Result<T, PerformError>;
 
-    fn try_take(&self) -> Result<PerformState<T>, PerformError>;
+    fn try_take(&self) -> Result<T, PerformError>;
+    async fn take(&self) -> Result<T, PerformError>;
 
     fn take_from_id(
         &self,
-        hash_map: &mut HashMap<Uuid, Result<PerformState<T>, PerformError>>,
+        hash_map: &mut HashMap<Uuid, Result<T, PerformError>>,
         id: &Uuid,
-    ) -> Result<PerformState<T>, PerformError>;
+    ) -> Result<T, PerformError>;
     fn get_as_take(
         &self,
-        hash_map: &mut HashMap<Uuid, Result<PerformState<T>, PerformError>>,
+        hash_map: &mut HashMap<Uuid, Result<T, PerformError>>,
         id: &Uuid,
-    ) -> Option<Result<PerformState<T>, PerformError>>;
-    fn into_as_take<U, E>(&self, result: Result<U, E>) -> Result<U, E>;
+    ) -> Option<Result<T, PerformError>>;
 }
 
 #[derive(Debug, Error, Clone)]
 pub enum PerformError {
-    #[error("NotSecured")]
-    NotSecured,
     #[error("Locked")]
     Locked,
-}
-
-#[derive(Clone)]
-pub enum PerformState<T> {
+    #[error("Empty")]
     Empty,
-    Done(T),
 }
 
-#[derive(PartialEq)]
-pub enum Progress {
-    Triggered,
-    Off,
+#[allow(dead_code)]
+pub fn ok_or_empty<T>(option: Option<Result<T, PerformError>>) -> Result<T, PerformError> {
+    match option {
+        Some(result) => result,
+        None => Err(PerformError::Empty),
+    }
 }
 
 #[macro_export]
@@ -65,8 +61,9 @@ macro_rules! build_perform {
     ($value:ty) => {
         use std::collections::HashMap;
         use std::future::Future;
-        type V = $crate::PerformState<$value>;
-        type H = HashMap<$crate::Uuid, Result<V, $crate::PerformError>>;
+        type V = $value;
+        type E = $crate::PerformError;
+        type H = HashMap<$crate::Uuid, Result<V, E>>;
 
         static STORE: $crate::OnceCell<$crate::Mutex<H>> = $crate::OnceCell::new();
 
@@ -77,22 +74,22 @@ macro_rules! build_perform {
             })
         }
 
+        fn try_lock_and_do_mut<F>(f: F) -> Result<V, E>
+        where
+            F: FnOnce(&mut H) -> Result<V, E>,
+        {
+            let try_lock = global_data().try_lock();
+            match try_lock {
+                Ok(mut hash_map) => f(&mut *hash_map),
+                Err(_) => Err(E::Locked),
+            }
+        }
         async fn lock_and_do_mut<F, R>(f: F) -> R
         where
             F: FnOnce(&mut H) -> R,
         {
             let mut hash_map = global_data().lock().await;
             f(&mut *hash_map)
-        }
-        fn try_lock_and_do_mut<F>(f: F) -> Result<V, $crate::PerformError>
-        where
-            F: FnOnce(&mut H) -> Result<V, $crate::PerformError>,
-        {
-            let try_lock = global_data().try_lock();
-            match try_lock {
-                Ok(mut hash_map) => f(&mut *hash_map),
-                Err(_) => Err($crate::PerformError::Locked),
-            }
         }
 
         pub struct Session {
@@ -101,112 +98,117 @@ macro_rules! build_perform {
         }
 
         #[$crate::async_trait]
-        impl $crate::Performer<$value> for Session {
-            async fn activate() -> Self {
-                let id = $crate::Uuid::new_v4();
-                lock_and_do_mut(|hash_map| hash_map.insert(id, Ok($crate::PerformState::Empty)))
-                    .await;
-                Self { id }
-            }
+        impl $crate::Perform<V> for Session {
             #[allow(dead_code)]
-            fn activate_with_spawn_local() -> Self {
+            fn try_activate() -> Self {
                 let id = $crate::Uuid::new_v4();
-                $crate::spawn_local(async move {
-                    lock_and_do_mut(|hash_map| {
-                        hash_map.insert(id, Ok($crate::PerformState::Empty));
-                    })
-                    .await;
+                let _ = try_lock_and_do_mut(|hash_map| {
+                    let option = hash_map.insert(id, Err(E::Empty));
+                    $crate::ok_or_empty(option)
                 });
                 Self { id }
             }
-
-            async fn perform<Fut>(&self, fut: Fut)
-            where
-                Fut: Future<Output = $value> + 'static + Send,
-            {
-                let value = fut.await;
-                lock_and_do_mut(|hash_map| {
-                    hash_map.insert(self.id, Ok($crate::PerformState::Done(value)))
-                })
-                .await;
+            async fn activate() -> Self {
+                let id = $crate::Uuid::new_v4();
+                lock_and_do_mut(|hash_map| hash_map.insert(id, Err(E::Empty))).await;
+                Self { id }
             }
+
             #[allow(dead_code)]
             fn perform_with_spawn_local<Fut>(&self, fut: Fut)
             where
-                Fut: Future<Output = $value> + 'static,
+                Fut: Future<Output = V> + 'static,
             {
                 let id = self.id.clone();
                 $crate::spawn_local(async move {
                     let value = fut.await;
-                    lock_and_do_mut(|hash_map| {
-                        hash_map.insert(id, Ok($crate::PerformState::Done(value)))
-                    })
-                    .await;
+                    lock_and_do_mut(|hash_map| hash_map.insert(id, Ok(value))).await;
                 });
             }
+            async fn perform<Fut>(&self, fut: Fut)
+            where
+                Fut: Future<Output = V> + 'static + Send,
+            {
+                let id = self.id.clone();
+                let value = fut.await;
+                lock_and_do_mut(|hash_map| hash_map.insert(id, Ok(value))).await;
+            }
 
-            async fn take(&self) -> Result<V, $crate::PerformError> {
+            fn try_ready(&self) -> Result<V, E> {
+                let id = self.id.clone();
+                try_lock_and_do_mut(|hash_map| {
+                    let option = hash_map.insert(id, Err(E::Empty));
+                    $crate::ok_or_empty(option)
+                })
+            }
+
+            fn try_take(&self) -> Result<V, E> {
+                try_lock_and_do_mut(|hash_map| self.take_from_id(hash_map, &self.id))
+            }
+            async fn take(&self) -> Result<V, E> {
                 lock_and_do_mut(|hash_map| self.take_from_id(hash_map, &self.id)).await
             }
 
-            fn try_take(&self) -> Result<V, $crate::PerformError> {
-                try_lock_and_do_mut(|hash_map| self.take_from_id(hash_map, &self.id))
+            fn take_from_id(&self, hash_map: &mut H, id: &$crate::Uuid) -> Result<V, E> {
+                let option = self.get_as_take(hash_map, id);
+                $crate::ok_or_empty(option)
             }
-
-            fn take_from_id(
-                &self,
-                hash_map: &mut H,
-                id: &$crate::Uuid,
-            ) -> Result<V, $crate::PerformError> {
-                let some_result = self.get_as_take(hash_map, id);
-                match some_result {
-                    Some(result) => self.into_as_take(result),
-                    None => Err($crate::PerformError::NotSecured),
-                }
-            }
-            fn get_as_take(
-                &self,
-                hash_map: &mut H,
-                id: &$crate::Uuid,
-            ) -> Option<Result<V, $crate::PerformError>> {
+            fn get_as_take(&self, hash_map: &mut H, id: &$crate::Uuid) -> Option<Result<V, E>> {
                 hash_map.remove_entry(id).map(|(_id, r)| r)
             }
-            fn into_as_take<T, E>(&self, result: Result<T, E>) -> Result<T, E> {
-                result
-            }
+        }
+
+        #[derive(PartialEq)]
+        enum Progress {
+            Triggered,
+            Off,
         }
 
         #[allow(dead_code)]
-        pub struct Taker {
+        pub struct Performer {
             session: Session,
-            progress: $crate::Progress,
+            progress: Progress,
         }
-        impl Taker {
+        impl Performer {
             #[allow(dead_code)]
             pub fn new(session: Session) -> Self {
                 let instance = Self {
                     session: session,
-                    progress: $crate::Progress::Off,
+                    progress: Progress::Off,
                 };
                 return instance;
             }
             #[allow(dead_code)]
-            pub fn try_take<F>(&mut self, fut: F) -> Option<$value>
+            pub fn try_take(&mut self) -> Result<V, E> {
+                use $crate::Perform as _;
+
+                self.session.try_take().and_then(|v| {
+                    self.progress = Progress::Off;
+                    Ok(v)
+                })
+            }
+            #[allow(dead_code)]
+            pub async fn perform<F>(&mut self, fut: F)
             where
-                F: std::future::Future<Output = $value> + 'static,
+                F: std::future::Future<Output = V> + 'static + Send,
             {
-                use $crate::Performer as _;
-                let took = self.session.try_take();
-                if let Ok($crate::PerformState::Done(output)) = took {
-                    self.progress = $crate::Progress::Off;
-                    return Some(output);
-                } else {
-                    if self.progress == $crate::Progress::Off {
-                        self.session.perform_with_spawn_local(fut);
-                        self.progress = $crate::Progress::Triggered;
-                    }
+                use $crate::Perform as _;
+                if self.progress == Progress::Off {
+                    self.session.perform(fut).await;
+                    self.progress = Progress::Triggered;
                 }
-                return None;
+            }
+            #[allow(dead_code)]
+            pub fn perform_with_spawn_local<F>(&mut self, fut: F)
+            where
+                F: std::future::Future<Output = V> + 'static,
+            {
+                use $crate::Perform as _;
+                if self.progress == Progress::Off {
+                    let _is_ready = self.session.try_ready();
+                    self.session.perform_with_spawn_local(fut);
+                    self.progress = Progress::Triggered;
+                }
             }
         }
     };
@@ -215,14 +217,14 @@ macro_rules! build_perform {
 #[cfg(test)]
 mod tests {
     #[allow(unused_imports)]
-    use crate::{PerformError, PerformState, Performer};
+    use crate::{Perform, PerformError};
 
     #[allow(dead_code)]
     async fn run_test<Fut, T, A, S>(fut: Fut, assert: A, session: S) -> anyhow::Result<()>
     where
         Fut: std::future::Future<Output = T> + 'static + Send,
         A: FnOnce(T),
-        S: Performer<T>,
+        S: Perform<T>,
     {
         let session = session;
         session.perform(fut).await;
@@ -230,7 +232,7 @@ mod tests {
         let value_result = session.take().await;
         assert!(value_result.is_ok());
 
-        if let PerformState::Done(value) = value_result? {
+        if let Ok(value) = value_result {
             assert(value);
         } else {
             assert!(false);
